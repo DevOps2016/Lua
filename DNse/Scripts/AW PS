@@ -1,0 +1,561 @@
+$action=""
+$awd_ver="C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe"
+Import-Module WebAdministration; 
+function WriteLog($string)
+{
+    (Get-Date -format 'yyyy-MM-dd HH:mm:ss') + ": "+$string | out-file log.txt -append
+}
+function CreateLogVersionDeploy($info)
+{
+	(Get-Date -format 'yyyy-MM-dd HH:mm:ss') + ": " + $info | out-file "$WebrootFolder\deploy.txt"
+}
+function WriteLine(){
+	Write-Host "------------------------------------------" -ForegroundColor White
+}
+function WriteMsg($msg){
+	$date = Get-Date
+	Write-Host $msg -ForegroundColor DarkCyan
+}
+function WriteInfo($msg){
+	Write-Host
+	Write-Host "["(Get-Date -format 'yyyy-MM-dd HH:mm:ss')"] " $msg -ForegroundColor White
+}
+function WriteSuccess($msg){
+	Write-Host $msg -ForegroundColor Green
+}
+function WriteFail($msg){
+	Write-Host "["(Get-Date -format 'yyyy-MM-dd HH:mm:ss')"] " $msg -ForegroundColor Red
+}
+
+function CatchExeption()
+{
+	Write-Host "Script break on $stepname" -ForegroundColor Red
+	WriteLog("Script break on $stepname")
+}
+
+function Get-ComputerStats { 
+
+  process {
+        $avg = Get-WmiObject win32_processor -computername $ServerName | 
+                   Measure-Object -property LoadPercentage -Average | 
+                   Foreach {$_.Average}
+        $mem = Get-WmiObject win32_operatingsystem -ComputerName $ServerName |
+                   Foreach {"{0:N2}" -f ((($_.TotalVisibleMemorySize - $_.FreePhysicalMemory)*100)/ $_.TotalVisibleMemorySize)}
+        $free = Get-WmiObject Win32_Volume -ComputerName $ServerName -Filter "DriveLetter = 'C:'" |
+                    Foreach {"{0:N2}" -f (($_.FreeSpace / $_.Capacity)*100)}
+					
+					Write-Host "CPU usage: $avg %" -ForegroundColor Green
+					Write-Host "Memory usage: $mem %" -ForegroundColor Green
+					Write-Host "OS Disk free: $free %" -ForegroundColor Green    
+		Get-Process w3wp,EPiServer*,java*,wrapper* | Format-Table Name, @{Label="Running";Expression={[bool]$_.Responding}}, @{Label="Memory(Mb)";Expression={[int]($_.WorkingSet64/1024/1024)}},@{Label="Last running (sec)";Expression={[int]$_.CPU}},Handles,@{Label="Threads";Expression={[int]$_.Threads.Count}} -autosize | Format-List *
+  }
+}
+
+function StartPool()
+{
+		WriteMsg "Starting AppPool on $servername for $SiteName site"
+		WriteLog("Starting AppPool on $servername for $SiteName site")		
+		$MSDeployCall = $awd_ver #"msdeploy"
+		$destServer=$null
+		$destServer+=$servername
+		if($deployport -ne ""){
+			$destServer+=":"
+			$destServer+=$deployport
+		}
+		$VerbParam="-verb:sync"
+		$SourceParam="-source:recycleApp"
+		$DestParam="-dest:recycleApp=$SiteName,recycleMode=StartAppPool,computername=$destServer$agent_para"
+		
+		& $MSDeployCall $VerbParam $SourceParam $DestParam
+		if ($LASTEXITCODE -ne 0) {CatchExeption}
+		else
+		{
+			Write-Host "AppPool for $SiteName site is started" -ForegroundColor Green
+			WriteLog("AppPool for $SiteName site is started")
+		}
+		WriteLine
+}
+
+function StopPool()
+{
+			WriteMsg("Stopping AppPool on $servername for $sitename site")
+			WriteLog("Stopping AppPool on $servername for $sitename site")
+			$MSDeployCall = $awd_ver #"msdeploy"
+			$destServer=$null
+			$destServer+=$ServerName
+			
+			if($deployport -ne ""){
+				$destServer+=":"
+				$destServer+=$deployport
+			}
+			$VerbParam="-verb:sync"
+			$SourceParam="-source:recycleApp"
+			$DestParam="-dest:recycleApp=$SiteName,recycleMode=StopAppPool,computername=$destServer$agent_para"
+			
+			& $MSDeployCall $VerbParam $SourceParam $DestParam
+			if ($LASTEXITCODE -ne 0) 
+			{CatchExeption} 
+			else
+			{
+				Write-Host "AppPool for $SiteName site is stopped" -ForegroundColor Green
+				WriteLog("AppPool for $SiteName site is stopped")
+			}
+			WriteLine
+	
+}
+
+	
+function get-ChoiceOnExeption()
+{$choices = [System.Management.Automation.Host.ChoiceDescription[]](
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Stop","Stop execute script"),
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Try Repeate","Try Repeate execute $stepname step" ),
+				(New-Object System.Management.Automation.Host.ChoiceDescription "&Continue","Pass $stepname step and start execute next step" ),
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&RollBack","Start Rollback script" )
+    )
+	$caption = "Script has exception during execute $stepname step"
+	$message = "Which action should be used?" 
+	$result = $Host.UI.PromptForChoice($caption,$message,$choices,1)
+	return $result
+	}
+
+function get-HoldUserChoice()
+{$choices = [System.Management.Automation.Host.ChoiceDescription[]](
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Stop","Stop execute script"),
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Continue","Start execute next step" ),
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&RollBack","Start Rollback script" )
+    )
+	$caption = "Script is hold"
+	$message = "Which action should be used?" 
+	$result = $Host.UI.PromptForChoice($caption,$message,$choices,1)
+	return $result
+	}
+
+function get-LoadBalancerUserChoice()
+	{$choices = [System.Management.Automation.Host.ChoiceDescription[]](
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Stop","Stop execute script"),
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Continue","Start execute next step" )
+    )
+	$caption = "Pass more than $MinutesLimit minutes, but we have external connection for site. Need close all connection manually and continue"
+	$message = "Which action should be used?" 
+	$result = $Host.UI.PromptForChoice($caption,$message,$choices,1)
+	return $result
+	}
+
+function get-LoadBalancerStartUserChoice()
+	{$choices = [System.Management.Automation.Host.ChoiceDescription[]](
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Stop","Stop execute script"),
+                (New-Object System.Management.Automation.Host.ChoiceDescription "&Continue","Start execute next step" )
+    )
+	$caption = "Pass more than $MinutesLimit minutes, but site doesn't have new connection. Need check manually that LoadBalancer file renamed and continue"
+	$message = "Which action should be used?" 
+	$result = $Host.UI.PromptForChoice($caption,$message,$choices,1)
+	return $result
+	}
+
+function Hold()
+{
+	$Choice = get-HoldUserChoice
+	if($Choice -eq 0)
+	{Write-Host "User chose exit from script" -ForegroundColor Green
+	WriteLog("User chose exit from script")
+	exit}
+	elseif($Choice -eq 1){Write-Host "User chose continue deployment" -ForegroundColor Green
+	WriteLog("User chose continue deployment")
+	}
+	elseif($Choice -eq 2){Write-Host "User chose start rollback" -ForegroundColor Green
+	WriteLog("User chose start rollback")
+	$global:rlbck=1
+	return 1
+	}
+
+}
+
+function Get-Current-Sessions()
+{
+ 	(Get-Counter "\\$ServerName\Web Service($SiteName)\current connections").CounterSamples[0].CookedValue
+}
+
+$checkaliveOn = "checkalive.txt"
+$checkaliveOff = "checkalive.off.txt"
+
+function GetTheNumberOfConnections()
+{
+	$num = Get-Current-Sessions
+	Write-Host "The active connections are(is) $num" -ForegroundColor Green
+}
+
+function WaitUntilNoMoreConnections(){
+	$num = Get-Current-Sessions
+		$eslapse = 0
+		while($num -gt $MinConnectionAsOutOfLoad)
+		{
+			Write-Host "There are $num conection(s) left."
+			Start-Sleep -Seconds $WaitTimeForBLN
+			$eslapse = $eslapse + $WaitTimeForBLN
+			$num = Get-Current-Sessions		
+		}
+		
+		if($num -le $MinConnectionAsOutOfLoad)
+		{
+			Write-Host "No more active connections to $SiteName now. It took $eslapse second(s) for awaiting".		
+		}
+}
+
+function CheckOutOfBalancing(){
+	Write-Host "Off the CheckAlive"
+	$F = "$WebrootFolder\CtrlFreak\$checkaliveOn"
+	$FOff = "$WebrootFolder\CtrlFreak\$checkaliveOff"
+	Write-Host "CheckAlive is $F"
+	if([System.IO.File]::Exists($F))
+	{
+	 	#[System.IO.File]::Move($checkaliveOn,$checkaliveOff)
+		Rename-Item -Path $F -NewName $checkaliveOff
+		WaitUntilNoMoreConnections	
+		
+	}elseif([System.IO.File]::Exists($FOff)){
+		$(Throw "$SiteName is not in Load. No need to checkout")
+	}
+	
+	if([System.IO.File]::Exists($F))
+		{
+			$(Throw "$SiteName is failed to checkout Load.")
+		}
+}
+
+function StopIfOnline(){
+	$F = "$WebrootFolder\CtrlFreak\$checkaliveOn"
+	if([System.IO.File]::Exists($F))
+	{
+		$(Throw "$SiteName is online. Please check out of load then try deploy again.")
+	}
+}
+
+function WaitUntilGotConnections(){
+		$num = Get-Current-Sessions
+		$eslapse = 0
+		while($num -le 0)
+		{
+			Write-Host "There are $num conection(s)."
+			Start-Sleep -Seconds $WaitTimeForBLN
+			$eslapse = $eslapse + $WaitTimeForBLN
+			$num = Get-Current-Sessions		
+		}
+		if($num -gt 0)
+		{
+			Write-Host "$SiteName now is in load. There are $num conection(s). It took $eslapse second(s) for awaiting".		
+		}
+}
+
+function CheckInOfBalancing()
+{
+	Write-Host "On CheckAlive".
+	$F = "$WebrootFolder\CtrlFreak\$checkaliveOff"
+	$FOn = "$WebrootFolder\CtrlFreak\$checkaliveOn"
+	Write-Host "Current CheckAlive is $F"
+	if([System.IO.File]::Exists($F))
+	{
+		Rename-Item -Path $F -NewName $checkaliveOn		
+		WaitUntilGotConnections
+		
+	}
+	elseif([System.IO.File]::Exists($FOn)){
+		$(Throw "$SiteName is being in Load. No need to checkin")
+	}
+	else{		
+			[System.IO.File]::Copy("$ScriptFolder\package\checkalive.txt",$FOn);			
+			WaitUntilGotConnections
+	}
+	if(-not [System.IO.File]::Exists($FOn)){
+			$(Throw "$SiteName is failed to checkin Load. Not found $checkaliveOn")
+	}
+}
+
+function ResolveConfig(){
+	Write-Host "Deploy Webroot on $ServerName with $ParametrFileName" -ForegroundColor Green
+	#WriteLog("Deploy Webroot on $servername")		
+	
+	$ParametrsPath1=Join-Path $ScriptFolder package\Parameters
+	$ParametrsPath=Join-Path $ParametrsPath1 $ParametrFileName
+	$MSDeployCall = "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe"
+	$destServer=$null
+	$destServer+=$ServerName
+	if($deployport -ne ""){
+			$destServer+=":"
+			$destServer+=$deployport
+		}
+	$VerbParam = "-verb:sync"
+	$SourceParam = "-source:contentpath=$WebrootFolder"
+	$DestParam  ="-dest:contentpath=$WebrootFolder,computername=$destServer" #,tempAgent=true"
+	$SkipParam0 ="-skip:objectName=dirPath,absolutePath='CtrlFreak'"
+	$SkipParam1 ="-skip:objectName=dirPath,absolutePath='Communitylicenses'"
+	$SkipParam2 ="-skip:objectName=File,absolutePath='License.config'"
+	$SkipParam3 ="-skip:objectName=File,absolutePath='EPiServerCommunityLicense.config'"
+	$SkipParam4 ="-skip:objectName=File,absolutePath='Log.txt'"
+	$SkipParam5 ="-skip:objectName=File,absolutePath='App_Offline.htm'"#$SkipParam4
+	$SetParam   ="-setParamFile=$ParametrsPath"
+	& $MSDeployCall $VerbParam $SourceParam $DestParam $SkipParam0 $SkipParam1 $SkipParam2 $SkipParam3 $SkipParam4 $SetParam
+	 
+}
+
+
+function Purge(){	
+	#Webroot
+	$files = Get-ChildItem -Path  $WebrootFolder -Recurse -Exclude connectionStrings.config, EPiSolr.config, SolrCore.config, ServicePlus.config, License.config  |
+		Select -ExpandProperty FullName
+		Where {$_ -notlike '*checkalive*'}
+	Write-Host "Purge $WebrootFolder"
+	$c1 =0
+	foreach($f in $files)
+	{
+		if([System.IO.File]::Exists($f))
+		{
+			[System.IO.File]::SetAttributes($f, [System.IO.FileAttributes]::Normal);
+			[System.IO.File]::Delete($f)
+			$c+=1
+		}
+	}
+	Write-Host "Purged Webroot for $c file(s)"
+	#Lib
+	$files = Get-ChildItem -Path  $LibFolder -Recurse |
+		Select -ExpandProperty FullName		
+	Write-Host "Purge $LibFolder"
+	$c1 =0
+	foreach($f in $files)
+	{
+		if([System.IO.File]::Exists($f))
+		{		
+			[System.IO.File]::SetAttributes($f, [System.IO.FileAttributes]::Normal);
+			[System.IO.File]::Delete($f)
+			$c+=1
+		}
+	}
+	Write-Host "Purged Libraries for $c file(s)"
+}
+
+function StopWeb(){
+	#$appPool = Invoke-Command -ComputerName $Servername {	
+		#Get-Item ("IIS:\AppPools\"+$SiteName)
+		Stop-Website -Name $SiteName
+	#}
+		
+	#Write-Host $appPool
+}
+function StartWeb(){
+	#$appPool = Invoke-Command -ComputerName $Servername {	
+		#Get-Item ("IIS:\AppPools\"+$SiteName)
+		Start-Website -Name $SiteName
+	#}
+		
+	#Write-Host $appPool
+}
+
+function WarmUpTryReset($HTTP_Status){
+	IF($wamup -le $WarmUpMax){				
+	    if($HTTP_Status -ne 504)
+	    {
+	        Write-Host "The Site may be down with error:$HTTP_Status, trying to reset apppool #$wamup" -ForegroundColor Red
+	    }
+		
+		StopPool
+		StartPool	
+		$wamup = $wamup+1
+		WarmUp
+	}
+	ELSE{
+		$(Throw "Failed to warm up $SiteName")		
+	}
+}
+
+function WarmUp()
+{
+	try{
+	 	Write-Host "#$wamup Starting a warm up: $SiteURL" -ForegroundColor Gray	
+		
+		# First we create the request.
+		$HTTP_Request = [System.Net.WebRequest]::Create($SiteURL)
+        $HTTP_Request.Timeout=$HttpRequestTimeOutDefaultWarmUp
+        Write-Host "With timeout is $HttpRequestTimeOutDefaultWarmUp ms" -ForegroundColor Green
+		# We then get a response from the site.
+		$HTTP_Response = $HTTP_Request.GetResponse()
+		
+
+		# We then get the HTTP code as an integer.
+		$HTTP_Status = [int]$HTTP_Response.StatusCode
+
+		If ($HTTP_Status -eq 200) { 
+		    Write-Host "Site is OK!" -ForegroundColor Green
+			$HTTP_Response.Close()
+		}
+		ELSE{				
+			$HTTP_Response.Close()
+		    WarmUpTryReset $HTTP_Status
+		}
+	}catch{
+	    Write-Host "Error:  $_.Exception.Response, Failed from try hit url: $FullUrl" -ForegroundColor Red
+		WarmUpTryReset 504
+	}
+}
+# FUNCTION WarmUpListUrls
+# =============================================================================
+# Function: WarUpListUrls
+# Created: [21/10/2014]
+# Author: Thao Pham
+# Arguments:
+# =============================================================================
+# Purpose: Warm up some main urls of DN30
+#
+#
+# =============================================================================
+
+Function WarUpListUrls
+{
+    Param([string[]] $URL, [int]$IsDesktop)
+    Write-Host "# Set timeout for each response is 500 seconds" -ForegroundColor Green
+    [int]$Count = 1
+
+    foreach($URL in $URLs)
+    {
+        if($IsDesktop -eq 1)
+        {
+            $FullUrl = Join-Parts ($SiteURL, $URL) '/'
+        }
+        else
+        {
+            $FullUrl = Join-Parts ($SiteMobileURL, $URL) '/'
+        }
+        try{
+                      
+	 	    Write-Host "#$Count Starting a warm up: $FullUrl" -ForegroundColor White	
+		    # First we create the request.
+		    $HTTP_Request = [System.Net.WebRequest]::Create($FullUrl)
+            $HTTP_Request.Timeout=$HttpRequestTimeOutWarmUpList
+           
+		    # We then get a response from the site.
+		    $result = Measure-Command {  $HTTP_Response = $HTTP_Request.GetResponse() }
+		
+		    # We then get the HTTP code as an integer.
+		    $HTTP_Status = [int]$HTTP_Response.StatusCode
+            #$result = Measure-Command { $request = Invoke-WebRequest -Uri $uri }
+
+		    If ($HTTP_Status -eq 200) {
+                Write-Host "Status code: " $HTTP_Status -ForegroundColor Green
+                Write-Host "Status description: Ok" -ForegroundColor Green
+                Write-Host "Status response Uri: " $HTTP_Response.ResponseUri -ForegroundColor Green
+                Write-Host "Status time response: " $result.TotalMilliseconds "milli seconds" -ForegroundColor Green
+			    $HTTP_Response.Close()
+                $Count++
+                $global:TotalSuccess++
+		    }
+		    ELSE{				
+			    $HTTP_Response.Close()
+			    Write-Host "Error $HTTP_Status, Failed from try hit url: $FullUrl" -ForegroundColor Red
+                $global:TotalFailed++
+		    }
+	    }catch{
+		    Write-Host "Error:  $_.Exception.Response, Failed from try hit url: $FullUrl" -ForegroundColor Red
+            $global:TotalFailed++
+            $Count++
+	    }
+    }
+}
+[int]$global:TotalFailed = 0
+[int]$global:TotalSuccess = 0
+Function ReadWarmUpFile
+{
+    try
+    {
+        Write-Host "==============Start warming up list urls for desktop site=================" -ForegroundColor Green
+        Write-Host "# Start reading the file contains a list of urls desktop site" -ForegroundColor Green
+        $PathFolder = CombinePaths($ScriptFolder) ("\package\urlswarmup\")
+        $PathFile = CombinePaths($PathFolder) ("DNDesktopUrls.txt")
+        $URLs = Get-Content $PathFile
+        Write-Host "# Reading urls have done" -ForegroundColor Green
+        WarUpListUrls($URLs) 1
+        Write-Host "==============Warm up desktop site has done===================" -ForegroundColor Green
+        Write-Host "==============Start warming up list urls for mobile site===================" -ForegroundColor Green
+        Write-Host "# Start reading the file contains a list of urls mobile site" -ForegroundColor Green
+        $PathFile = CombinePaths($PathFolder) ("DNMobileUrls.txt")
+        $URLs = Get-Content $PathFile
+        Write-Host "# Reading list urls have done " -ForegroundColor Green
+        WarUpListUrls($URLs) 0
+        Write-Host "=============Warm up mobile site has done===================" -ForegroundColor Green
+        Write-Host "===============This step was finished=======================" -ForegroundColor Green
+        Write-Host "Total warm up success: "$global:TotalSuccess -ForegroundColor Green
+        if($global:TotalFailed -gt 0)
+        {
+            Write-Host "Total warm up failed: " $global:TotalFailed -ForegroundColor Red
+        }
+        else
+        {
+            Write-Host "Total warm up failed:" $global:TotalFailed -ForegroundColor Green
+        }
+        $global:TotalSuccess = 0;
+        $global:TotalFailed = 0;
+    }
+    catch
+    {
+        Write-Host "Error:  $_.Exception.Response -ForegroundColor Red"
+    }
+}
+[int]$global:CMSTotalFailed = 0
+[int]$global:CMSTotalSuccess = 0
+Function ReadWarmUpFileCMS
+{
+    try
+    {
+        Write-Host "==============Start warming up list urls for desktop site=================" -ForegroundColor Green
+        Write-Host "# Start reading the file contains a list of urls desktop site" -ForegroundColor Green
+        $PathFolder = CombinePaths($ScriptFolder) ("\package\urlswarmup\")
+        $PathFile = CombinePaths($PathFolder) ("DNDesktopCMSUrl.txt")
+        $URLs = Get-Content $PathFile
+        Write-Host "# Reading urls have done" -ForegroundColor Green
+        WarUpListUrls($URLs) 1
+        Write-Host "==============Warm up desktop site has done===================" -ForegroundColor Green
+       
+        Write-Host "===============This step was finished=======================" -ForegroundColor Green
+        Write-Host "Total warm up success: "$global:CMSTotalSuccess -ForegroundColor Green
+        if($global:ReadWarmUpFile -gt 0)
+        {
+            Write-Host "Total warm up failed: " $global:ReadWarmUpFile -ForegroundColor Red
+        }
+        else
+        {
+            Write-Host "Total warm up failed:" $global:ReadWarmUpFile -ForegroundColor Green
+        }
+        $global:CMSTotalSuccess = 0;
+        $global:ReadWarmUpFile = 0;
+    }
+    catch
+    {
+        Write-Host "Error:  $_.Exception.Response -ForegroundColor Red"
+    }
+}
+Function Join-Parts {
+    param ([string[]] $Parts, [string] $Seperator = '')
+    $search = '(?<!:)' + [regex]::Escape($Seperator) + '+'  #Replace multiples except in front of a colon for URLs.
+    $replace = $Seperator
+    ($Parts | ? {$_ -and $_.Trim().Length}) -join $Seperator -replace $search, $replace
+}
+[char[]]$trimChars = '\\'
+Function FixTerminatingSlash ($root) {
+    return $root.TrimEnd($trimChars)   
+}
+
+Function FixStartingSlash($suffix) {
+    return $suffix.TrimStart($trimChars)
+}
+
+Function CombinePaths ([string]$root, [string]$subdir) {
+    $left = FixTerminatingSlash($root)
+    $right = FixStartingSlash($subdir)
+    $fullPath = [System.IO.Path]::Combine($left, $right)
+    return $fullPath
+}
+# ==============================END===============================================
+$packagepath = $ScriptFolder
+	$global:rlbck=0
+	Write-Host "Start processing ... $action" -ForegroundColor Green
+	WriteLog("Start processing ... $action")
+	
+	$WebrootFolder = "$SiteFolder\Webroot" 
+	$LibFolder = "$SiteFolder\Libraries"
