@@ -1,0 +1,185 @@
+function StartPool2()
+{
+    try{
+		WriteMsg "Starting AppPool on $servername for $SiteName site"
+	
+		Start-WebAppPool $PoolName
+		while((Get-WebAppPoolState -name $PoolName).Value -ne "Started")
+	        {
+			    Start-Sleep -Seconds 3
+	        }
+		if ($LASTEXITCODE -ne 0) {CatchExeption}
+		else
+		{
+			Write-Host "AppPool for $SiteName site is started" -ForegroundColor Green
+			WriteLog("AppPool for $SiteName site is started")
+		}
+    }catch{
+        
+    }
+		WriteLine
+}
+
+function StartPoolDI2()
+{
+    try{
+		WriteMsg "Starting AppPool on $servername for $SiteNameDI site"
+		Start-WebAppPool $PoolNameDI
+		while((Get-WebAppPoolState -name $PoolNameDI).Value -ne "Started")
+		{
+			Start-Sleep -Seconds 3
+		}
+		if ($LASTEXITCODE -ne 0) {CatchExeption}
+		else
+		{
+			Write-Host "AppPool for $SiteNameDI site is started" -ForegroundColor Green
+			WriteLog("AppPool for $SiteNameDI site is started")
+		}
+    }catch{
+        
+    }
+		WriteLine
+}
+function StopPool2()
+{
+    try{
+			WriteMsg("Stopping AppPool on $servername for $sitename site")
+		
+		    Stop-WebAppPool $PoolName
+			 while((Get-WebAppPoolState -name $PoolName).Value -ne "Stopped")
+	        {
+			    Start-Sleep -Seconds 3
+	        }
+	        
+			if ($LASTEXITCODE -ne 0) 
+			{CatchExeption} 
+			else
+			{
+				Write-Host "AppPool for $SiteName site is stopped" -ForegroundColor Green
+				WriteLog("AppPool for $SiteName site is stopped")
+			}
+    }catch{
+        
+    }
+			WriteLine
+	
+}
+
+function StopPoolDI2()
+{
+    try{
+			WriteMsg("Stopping AppPool on $servername for $sitenameDI site")
+		
+		    Stop-WebAppPool $PoolNameDI
+			 while((Get-WebAppPoolState -name $PoolNameDI).Value -ne "Stopped")
+	        {
+			    Start-Sleep -Seconds 3
+	        }
+	        
+			if ($LASTEXITCODE -ne 0) 
+			{CatchExeption} 
+			else
+			{
+				Write-Host "AppPool for $SiteNameDI site is stopped" -ForegroundColor Green
+				WriteLog("AppPool for $SiteNameDI site is stopped")
+			}
+    }catch{
+        
+    }
+	WriteLine
+	
+}
+
+function WarmUpTryReset2($HTTP_Status){
+	IF($wamup -le $WarmUpMax){				
+	    if($HTTP_Status -ne 504)
+	    {
+	        Write-Host "The Site may be down with error:$HTTP_Status, trying to reset apppool #$wamup" -ForegroundColor Red
+	    }
+		
+		StopPool2
+		StartPool2	
+		$wamup = $wamup+1
+		WarmUp2
+	}
+	ELSE{
+		$(Throw "Failed to warm up $SiteName")		
+	}
+}
+
+function WarmUpTryResetDI2($HTTP_Status){
+	IF($wamup -le $WarmUpMax){				
+	    if($HTTP_Status -ne 504)
+	    {
+	        Write-Host "The Site may be down with error:$HTTP_Status, trying to reset apppool #$wamup" -ForegroundColor Red
+	    }
+		
+		StopPoolDI2
+		StartPoolDI2	
+		$wamup = $wamup+1
+		WarmUpDI2
+	}
+	ELSE{
+		$(Throw "Failed to warm up $SiteName")		
+	}
+}
+
+function WarmUp2()
+{
+	try{
+	 	Write-Host "#$wamup Starting a warm up: $SiteURL" -ForegroundColor Gray	
+		
+		# First we create the request.
+		$HTTP_Request = [System.Net.WebRequest]::Create($SiteURL)
+        $HTTP_Request.Timeout=$HttpRequestTimeOutDefaultWarmUp
+        Write-Host "With timeout is $HttpRequestTimeOutDefaultWarmUp ms" -ForegroundColor Green
+		# We then get a response from the site.
+		$HTTP_Response = $HTTP_Request.GetResponse()
+		
+
+		# We then get the HTTP code as an integer.
+		$HTTP_Status = [int]$HTTP_Response.StatusCode
+
+		If ($HTTP_Status -eq 200) { 
+		    Write-Host "Site is OK!" -ForegroundColor Green
+			$HTTP_Response.Close()
+		}
+		ELSE{				
+			$HTTP_Response.Close()
+		    WarmUpTryReset2 $HTTP_Status
+		}
+	}catch{
+	    Write-Host "Error:  $_.Exception.Response, Failed from try hit url: $FullUrl" -ForegroundColor Red
+		WarmUpTryReset2 504
+	}
+} 
+
+function WarmUpDI2()
+{
+	try{
+	 	Write-Host "#$wamup Starting a warm up: $SiteURLDI" -ForegroundColor Gray	
+		
+		# First we create the request.
+		$HTTP_Request = [System.Net.WebRequest]::Create($SiteURLDI)
+        $HTTP_Request.Timeout=$HttpRequestTimeOutDefaultWarmUp
+        Write-Host "With timeout is $HttpRequestTimeOutDefaultWarmUp ms" -ForegroundColor Green
+		# We then get a response from the site.
+		$HTTP_Response = $HTTP_Request.GetResponse()
+		
+
+		# We then get the HTTP code as an integer.
+		$HTTP_Status = [int]$HTTP_Response.StatusCode
+
+		If ($HTTP_Status -eq 200) { 
+		    Write-Host "Site is OK!" -ForegroundColor Green
+			$HTTP_Response.Close()
+		}
+		ELSE{				
+			$HTTP_Response.Close()
+		    WarmUpTryResetDI2 $HTTP_Status
+		}
+	}catch{
+	    Write-Host "Error:  $_.Exception.Response, Failed from try hit url: $FullUrl" -ForegroundColor Red
+		WarmUpTryResetDI2 504
+	}
+}
